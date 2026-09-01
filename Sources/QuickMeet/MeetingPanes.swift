@@ -10,6 +10,9 @@ import SwiftUI
 /// is how notes go unread.
 struct SummaryPane: View {
     let meeting: Meeting
+    /// Built once by the detail view and handed down, rather than derived per bullet —
+    /// every lookup in it walks the whole turn list to build.
+    let speakers: SpeakerDirectory
     @ObservedObject var store: MeetingStore
 
     var body: some View {
@@ -18,7 +21,7 @@ struct SummaryPane: View {
                 if let notes = meeting.notes, !notes.isEmpty {
                     if !notes.summary.isEmpty {
                         Card {
-                            Text(meeting.substituteNames(in: notes.summary))
+                            Text(speakers.substituting(in: notes.summary))
                                 .font(.system(size: 14))
                                 .lineSpacing(3)
                                 .textSelection(.enabled)
@@ -31,7 +34,7 @@ struct SummaryPane: View {
                                 ForEach(notes.actionItems) { item in
                                     ActionItemRow(
                                         item: item,
-                                        meeting: meeting,
+                                        speakers: speakers,
                                         onToggle: { toggle(item) }
                                     )
                                 }
@@ -89,7 +92,7 @@ struct SummaryPane: View {
                         .fill(Color.secondary.opacity(0.45))
                         .frame(width: 4, height: 4)
                         .padding(.top, 6)
-                    Text(meeting.substituteNames(in: item))
+                    Text(speakers.substituting(in: item))
                         .font(.system(size: 13))
                         .lineSpacing(2)
                         .textSelection(.enabled)
@@ -112,7 +115,7 @@ struct SummaryPane: View {
 
 struct ActionItemRow: View {
     let item: ActionItem
-    let meeting: Meeting
+    let speakers: SpeakerDirectory
     var onToggle: () -> Void
 
     var body: some View {
@@ -124,7 +127,7 @@ struct ActionItemRow: View {
             }
             .buttonStyle(.plain)
 
-            Text(meeting.substituteNames(in: item.text))
+            Text(speakers.substituting(in: item.text))
                 .font(.system(size: 13))
                 .strikethrough(item.done, color: .secondary)
                 .foregroundStyle(item.done ? .secondary : .primary)
@@ -133,7 +136,7 @@ struct ActionItemRow: View {
 
             if !item.owner.isEmpty {
                 SpeakerChip(
-                    name: meeting.substituteNames(in: item.owner),
+                    name: speakers.substituting(in: item.owner),
                     color: ownerColor,
                     compact: true
                 )
@@ -144,8 +147,8 @@ struct ActionItemRow: View {
     /// Colour the owner chip like the speaker it names, when it names one — so an action
     /// item lines up visually with the person in the transcript who took it on.
     private var ownerColor: Color {
-        for speaker in meeting.speakers where meeting.name(for: speaker) == item.owner {
-            return Theme.color(for: speaker)
+        for speaker in speakers.order where speakers.name(of: speaker) == item.owner {
+            return Theme.color(index: speakers.index(of: speaker))
         }
         return .secondary
     }
@@ -155,6 +158,7 @@ struct ActionItemRow: View {
 
 struct TranscriptPane: View {
     let meeting: Meeting
+    let speakers: SpeakerDirectory
     @Binding var search: String
 
     var body: some View {
@@ -188,7 +192,7 @@ struct TranscriptPane: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(filtered) { turn in
-                        TurnRow(turn: turn, meeting: meeting, highlight: search)
+                        TurnRow(turn: turn, speakers: speakers, highlight: search)
                     }
                 }
                 .padding(24)
@@ -204,15 +208,15 @@ struct TranscriptPane: View {
 
 struct TurnRow: View {
     let turn: Turn
-    let meeting: Meeting
+    let speakers: SpeakerDirectory
     let highlight: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 7) {
                 SpeakerChip(
-                    name: meeting.name(for: turn.speaker),
-                    color: Theme.color(for: turn.speaker)
+                    name: speakers.name(of: turn.speaker),
+                    color: Theme.color(index: speakers.index(of: turn.speaker))
                 )
                 Text(Meeting.timestamp(turn.start))
                     .font(.system(size: 10, design: .monospaced))
@@ -230,7 +234,7 @@ struct TurnRow: View {
             // A hairline in the speaker's colour down the left edge — enough to track who
             // is talking while skimming, without a chip on every line.
             Rectangle()
-                .fill(Theme.color(for: turn.speaker).opacity(0.35))
+                .fill(Theme.color(index: speakers.index(of: turn.speaker)).opacity(0.35))
                 .frame(width: 2)
                 .padding(.vertical, 1)
                 .offset(x: -10)

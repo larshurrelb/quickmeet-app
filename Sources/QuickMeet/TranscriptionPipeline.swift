@@ -15,10 +15,12 @@ final class TranscriptionPipeline {
     /// Meetings currently being processed, so a second Retry cannot start a duplicate run.
     private var running = Set<UUID>()
 
-    /// Chunks finished in the current run, for the progress line. Lives on the pipeline
-    /// rather than being captured by the progress closure so the counter has one owner on
-    /// the main actor instead of being mutated from the transcription task.
-    private var completedChunks = 0
+    /// Chunks finished, per run, for the progress line. Keyed by meeting rather than held
+    /// as one field: `running` is a set, so two meetings retried at once would otherwise
+    /// share a counter and report each other's progress. Lives on the pipeline so the
+    /// counter has one owner on the main actor instead of being mutated from the
+    /// transcription task.
+    private var completedChunks: [UUID: Int] = [:]
 
     init(store: MeetingStore, settings: AppSettings = .shared) {
         self.store = store
@@ -34,6 +36,7 @@ final class TranscriptionPipeline {
         Task { [weak self] in
             await self?.run(id)
             self?.running.remove(id)
+            self?.completedChunks[id] = nil
         }
     }
 
@@ -95,12 +98,15 @@ final class TranscriptionPipeline {
                 return
             }
 
-            completedChunks = 0
+            completedChunks[id] = 0
+            // Reports the chunk being worked on, not the one just finished — "Transcribing
+            // 3 of 5" while the third is in flight reads better than a counter that sits on
+            // 2 for twenty minutes.
             let bump: @Sendable () -> Void = { [weak self] in
                 Task { @MainActor in
                     guard let self else { return }
-                    self.completedChunks += 1
-                    let done = min(self.completedChunks + 1, total)
+                    self.completedChunks[id, default: 0] += 1
+                    let done = min((self.completedChunks[id] ?? 0) + 1, total)
                     self.store.update(id) { $0.progress = "Transcribing \(done) of \(total)…" }
                 }
             }

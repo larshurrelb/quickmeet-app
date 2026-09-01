@@ -42,9 +42,9 @@ import CoreAudio
 ///    half has zero input channels. Putting it in an aggregate therefore never opens its
 ///    microphone, which is what actually triggers the A2DP→HFP collapse. Verified on CMF
 ///    Buds 2: `2/0` channels on the output device.
-///  * `verifyIOStarted` now checks that frames are genuinely arriving shortly after start,
-///    so if any of this stops holding, it reports a failure instead of recording an hour
-///    of nothing.
+///  * If any of this stops holding, `MeetingRecorder` says so at the end of the meeting:
+///    frames but no signal is reported as a refused permission, and no frames at all as
+///    nothing having played.
 final class SystemAudioRecorder {
     private var tapID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
@@ -62,9 +62,9 @@ final class SystemAudioRecorder {
     private(set) var sourceLabel = "—"
 
     /// Whether the IOProc has actually been called. Written on the IO thread, read from
-    /// the main thread a second later — a monotonic flag, so the only way to read it wrong
-    /// is to see `false` a moment before it becomes true, which is exactly what the delay
-    /// in `verifyIOStarted` is for.
+    /// the main thread much later — a monotonic flag, so the only way to read it wrong is
+    /// to see `false` a moment before it becomes true, and every reader here is either the
+    /// 20-second health check or the end of the meeting.
     private var didReceiveFrames = false
 
     /// True once audio has genuinely started arriving.
@@ -84,12 +84,6 @@ final class SystemAudioRecorder {
         Double(hostTime) * timebase.numer / timebase.denom / 1e9
     }
 
-    /// Output devices to try as the aggregate's clock, best first.
-    private var anchors: [String] = []
-    private var anchorIndex = 0
-    private var currentSource: SystemAudioSource = .allApps
-    private var outputURL: URL?
-
     var onLevel: ((Float) -> Void)?
 
     /// Kept past `stop()` — see the note in `MicRecorder`. Reading these through to the
@@ -103,7 +97,6 @@ final class SystemAudioRecorder {
 
     enum TapError: LocalizedError {
         case permissionDenied(OSStatus)
-        case couldNotCreateTap(OSStatus)
         case couldNotCreateAggregate(OSStatus)
         case couldNotStart(String, OSStatus)
         case noTapFormat
@@ -113,8 +106,6 @@ final class SystemAudioRecorder {
             switch self {
             case .permissionDenied:
                 return "QuickMeet isn't allowed to record system audio yet."
-            case let .couldNotCreateTap(status):
-                return "The system audio tap could not be created (status \(status))."
             case let .couldNotCreateAggregate(status):
                 return "The system audio device could not be created (status \(status))."
             case let .couldNotStart(step, status):
@@ -143,24 +134,9 @@ final class SystemAudioRecorder {
         // padded like any other gap, so the two streams start aligned instead of the
         // system stream beginning wherever the far end happened to first make a sound.
         lastHostSeconds = Self.hostSeconds(mach_absolute_time())
-        currentSource = source
         sourceLabel = source.label
-        anchors = Self.anchorCandidates()
-        anchorIndex = 0
-        outputURL = url
 
-        try openCapture()
-        isRecording = true
-    }
-
-    /// Builds the tap, the aggregate and the IOProc, and starts IO.
-    ///
-    /// Separate from `start` so `reattach()` can rebuild all three against a different
-    /// clock device without disturbing the writer or anything already recorded into it.
-    private func openCapture() throws {
-        guard let url = outputURL else { throw TapError.noTapFormat }
-
-        let description = try Self.makeDescription(for: currentSource)
+        let description = try Self.makeDescription(for: source)
 
         var tap = AudioObjectID(kAudioObjectUnknown)
         let tapStatus = AudioHardwareCreateProcessTap(description, &tap)
@@ -174,13 +150,23 @@ final class SystemAudioRecorder {
         }
         tapID = tap
 
+        // Everything, not just the tap. Failing after the writer was created used to leave
+        // it open — `stop()` returns early when `isRecording` is false, so its drain timer
+        // and its file handle would have outlived the meeting.
         var failed = true
-        defer { if failed { destroyTap() } }
+        defer {
+            if failed {
+                teardownIO()
+                writer?.close()
+                writer = nil
+                monoBuffer = nil
+            }
+        }
 
         guard let tapFormat = Self.format(ofTap: tap) else { throw TapError.noTapFormat }
         tapChannels = Int(tapFormat.channelCount)
         Diagnostics.log(
-            "tap created source=\(currentSource.label) rate=\(Int(tapFormat.sampleRate))Hz ch=\(tapChannels)"
+            "tap created source=\(source.label) rate=\(Int(tapFormat.sampleRate))Hz ch=\(tapChannels)"
         )
 
         let (aggregate, offset) = try makeAggregate(
@@ -198,13 +184,9 @@ final class SystemAudioRecorder {
         else { throw TapError.noTapFormat }
         self.monoBuffer = monoBuffer
 
-        // Created once and kept across re-anchoring — the file must survive a change of
-        // clock device with everything recorded so far still in it.
-        if writer == nil {
-            let writer = try PCMStreamWriter(url: url, sourceFormat: captureFormat, maxFrames: 8192)
-            writer.onLevel = { [weak self] level in self?.onLevel?(level) }
-            self.writer = writer
-        }
+        let writer = try PCMStreamWriter(url: url, sourceFormat: captureFormat, maxFrames: 8192)
+        writer.onLevel = { [weak self] level in self?.onLevel?(level) }
+        self.writer = writer
 
         var proc: AudioDeviceIOProcID?
         let procStatus = AudioDeviceCreateIOProcIDWithBlock(
@@ -225,6 +207,7 @@ final class SystemAudioRecorder {
         }
 
         failed = false
+        isRecording = true
     }
 
     /// Output devices to anchor the aggregate's clock to, best first.
@@ -234,26 +217,28 @@ final class SystemAudioRecorder {
     /// arrived": no device clocks while idle, so switching anchors there fixes nothing and
     /// only churns the audio graph mid-meeting.
     private static func anchorCandidates() -> [String] {
-        var candidates: [String] = []
-        if let id = AudioDevices.defaultOutputDeviceID, let uid = AudioDevices.uid(forDeviceID: id) {
-            candidates.append(uid)
+        let preferred = AudioDevices.defaultOutputDeviceID.flatMap(AudioDevices.uid(forDeviceID:))
+
+        // One enumeration, partitioned as it goes. Asking `isBluetooth(uid:)` per candidate
+        // walked every device in the system again for each one, twice over.
+        var wired: [String] = []
+        var bluetooth: [String] = []
+        for device in AudioDevices.outputDevices() where device.uid != preferred {
+            // Non-Bluetooth first, for the same clock reason the default output leads.
+            if AudioDevices.isBluetooth(deviceID: device.id) {
+                bluetooth.append(device.uid)
+            } else {
+                wired.append(device.uid)
+            }
         }
-        let others = AudioDevices.outputDeviceUIDs().filter { !candidates.contains($0) }
-        // Non-Bluetooth first among the rest, for the same clock reason.
-        candidates.append(contentsOf: others.filter { !AudioDevices.isBluetooth(uid: $0) })
-        candidates.append(contentsOf: others.filter { AudioDevices.isBluetooth(uid: $0) })
-        return candidates
+        return (preferred.map { [$0] } ?? []) + wired + bluetooth
     }
 
-    /// Checks that frames are really arriving, a moment after starting.
-    ///
-    /// This exists because every failure mode of a process tap is silent. A tap-only
-    /// aggregate creates, reports channels, accepts an IOProc and starts — all `noErr` —
-    /// and then never calls back. Without this the app would show a level meter at zero
-    /// for an hour and produce a meeting with only one side of the conversation in it,
-    /// and nothing in the log would say why.
-    ///
     /// A hint about the capture, or nil when there is nothing worth saying.
+    ///
+    /// Every failure mode of a process tap is silent — a tap-only aggregate creates,
+    /// reports channels, accepts an IOProc and starts, all `noErr`, and then never calls
+    /// back — so the temptation is to check early that frames are arriving. Don't.
     ///
     /// **Receiving no frames is not a failure.** Measured, on a fresh process per trial:
     /// no output device clocks while nothing is playing — not the Bluetooth default, not
@@ -539,7 +524,7 @@ final class SystemAudioRecorder {
     private func makeAggregate(tapUID: String, tapChannels: Int) throws -> (AudioDeviceID, Int) {
         // The tap captures what each process plays, not what one device renders, so the
         // choice of anchor changes only the clock — never what ends up in the recording.
-        for anchor in Array(anchors[min(anchorIndex, anchors.count)...]) {
+        for anchor in Self.anchorCandidates() {
             guard let device = Self.createAggregate(tapUID: tapUID, anchorUID: anchor) else { continue }
 
             // Channels the anchor contributes come first; the tap's are appended. Only the
@@ -557,8 +542,9 @@ final class SystemAudioRecorder {
         }
 
         // Last resort. Known to create cleanly and then never run its IOProc, so this is
-        // only worth trying when there is no output device at all to anchor to — and
-        // `verifyIOStarted` will catch it if it behaves the way it usually does.
+        // only worth trying when there is no output device at all to anchor to. If it
+        // behaves the way it usually does, the meeting ends with no frames at all and
+        // `MeetingRecorder` says so.
         if let device = Self.createAggregate(tapUID: tapUID, anchorUID: nil) {
             Diagnostics.log("aggregate: no anchor available, falling back to a tap-only device")
             return (device, 0)

@@ -2,53 +2,50 @@ import AppKit
 import AVFoundation
 import SwiftUI
 
-@MainActor
-final class SettingsWindowController {
-    private var window: NSWindow?
-    private var hosting: NSHostingView<SettingsView>?
-    private let store: MeetingStore
+/// Settings, in the meetings window and wearing its shape.
+///
+/// It used to be a window of its own, which meant two things called "QuickMeet" in the
+/// window list and no way to get from one to the other. Now it is the same window with the
+/// same sidebar-and-detail split — the sidebar lists the categories where it otherwise
+/// lists meetings, and the button in the bottom-left corner swaps between the two, in the
+/// same place either way.
+enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
+    /// Everything that has to be true before a recording can work at all, on one page and
+    /// first in the list. Splitting the key from the microphone from the system-audio
+    /// permission meant a new user had to visit three pages to find out what was still
+    /// missing.
+    case setup
+    case consent
+    case notes
+    case recordings
+    case general
 
-    init(store: MeetingStore) {
-        self.store = store
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .setup: return "Setup"
+        case .consent: return "Consent"
+        case .notes: return "Notes"
+        case .recordings: return "Recordings"
+        case .general: return "General"
+        }
     }
 
-    func show() {
-        if window == nil { build() }
-        reloadIfVisible()
-        NSApp.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
-    }
-
-    /// The SwiftUI view seeds its `@State` at construction, so anything changed from the
-    /// status menu while Settings is open has to be pushed in from this side. The menu
-    /// reads its own state when it opens; this is the other direction.
-    func reloadIfVisible() {
-        guard let hosting else { return }
-        hosting.rootView = SettingsView(store: store)
-    }
-
-    private func build() {
-        let hosting = NSHostingView(rootView: SettingsView(store: store))
-        hosting.sizingOptions = []
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "QuickMeet Settings"
-        window.contentView = hosting
-        window.isReleasedWhenClosed = false
-        window.center()
-
-        self.window = window
-        self.hosting = hosting
+    var icon: String {
+        switch self {
+        case .setup: return "checklist"
+        case .consent: return "person.2.wave.2"
+        case .notes: return "text.append"
+        case .recordings: return "internaldrive"
+        case .general: return "gearshape"
+        }
     }
 }
 
 struct SettingsView: View {
     @ObservedObject var store: MeetingStore
+    var section: SettingsSection
 
     private let settings = AppSettings.shared
 
@@ -66,23 +63,46 @@ struct SettingsView: View {
     @State private var micGranted = MicRecorder.hasMicrophoneAccess
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                apiSection
-                Divider()
-                audioSection
-                Divider()
-                consentSection
-                Divider()
-                notesSection
-                Divider()
-                storageSection
-                Divider()
-                footer
+        VStack(alignment: .leading, spacing: 0) {
+            // The page title is outside the scroll view, and not only because it should
+            // stay put while the page scrolls. A `ScrollView` that touches the top of the
+            // window extends *into* the titlebar and insets its content instead (measured:
+            // `contentInsets.top` 32), so scrolled text slides up to the window's very top
+            // edge with a transparent titlebar over it. Anything non-scrolling above it —
+            // this heading — stops that.
+            Text(section.title)
+                .font(.system(size: 20, weight: .semibold))
+                .padding(.horizontal, 24)
+                .padding(.top, 18)
+                .padding(.bottom, 14)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    switch section {
+                    case .setup:
+                        setupSection
+                    case .consent:
+                        consentSection
+                    case .notes:
+                        notesSection
+                    case .recordings:
+                        storageSection
+                    case .general:
+                        generalSection
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 20)
+                // A readable column instead of a hard size. The old fixed 520×640 frame was
+                // what the settings *window* was, and dropping it into a resizable window
+                // unchanged would have pinned it to that size in the middle of the pane.
+                .frame(maxWidth: 620, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(22)
         }
-        .frame(width: 520, height: 640)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear(perform: load)
     }
 
@@ -97,6 +117,67 @@ struct SettingsView: View {
         playSound = settings.playSound
         hotkeyEnabled = settings.hotkeyEnabled
         micGranted = MicRecorder.hasMicrophoneAccess
+    }
+
+    // MARK: - Setup
+
+    /// One page with everything that has to be done before a recording works: the key, the
+    /// microphone, the system-audio permission. The checklist at the top answers "why isn't
+    /// this working" without reading any of the prose underneath it.
+    private var setupSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            readiness
+            apiSection
+            Divider()
+            audioSection
+        }
+    }
+
+    private var readiness: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            readinessRow(
+                done: settings.hasAPIKey,
+                "Gemini API key",
+                settings.hasAPIKey ? "Saved on this Mac" : "Needed — paste one below"
+            )
+            readinessRow(
+                done: micGranted,
+                "Microphone",
+                micGranted ? "Allowed" : "macOS will ask on your first recording"
+            )
+            if recordSystem {
+                readinessRow(
+                    done: probeResult == true,
+                    unknown: probeResult == nil,
+                    "System audio",
+                    probeResult == nil
+                        ? "Unknown until it is opened — use Check permission below"
+                        : (probeResult == true ? "Allowed" : "Refused — grant it in System Settings")
+                )
+            }
+        }
+        .padding(14)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: Theme.cardCorner))
+    }
+
+    private func readinessRow(
+        done: Bool, unknown: Bool = false, _ title: String, _ detail: String
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: unknown
+                ? "questionmark.circle"
+                : (done ? "checkmark.circle.fill" : "exclamationmark.circle.fill"))
+                .font(.system(size: 12))
+                .foregroundStyle(unknown ? Color.secondary : (done ? Color.green : Color.orange))
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 110, alignment: .leading)
+            Text(detail)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     // MARK: - API key
@@ -232,7 +313,7 @@ struct SettingsView: View {
     // MARK: - Consent
 
     private var consentSection: some View {
-        section("Consent", "person.2.wave.2") {
+        page {
             Text(ConsentCopy.body)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -258,7 +339,7 @@ struct SettingsView: View {
     // MARK: - Notes
 
     private var notesSection: some View {
-        section("Notes", "text.append") {
+        page {
             HStack {
                 Text("Language").frame(width: 110, alignment: .leading)
                 TextField("Same as the meeting", text: $notesLanguage)
@@ -276,7 +357,7 @@ struct SettingsView: View {
     // MARK: - Storage
 
     private var storageSection: some View {
-        section("Recordings", "internaldrive") {
+        page {
             Picker("", selection: $retention) {
                 ForEach(AudioRetention.allCases) { option in
                     Text(option.label).tag(option)
@@ -309,8 +390,8 @@ struct SettingsView: View {
 
     // MARK: - Footer
 
-    private var footer: some View {
-        section("General", "gearshape") {
+    private var generalSection: some View {
+        page {
             Toggle("Global shortcut ⌥⌘R starts and stops a meeting", isOn: $hotkeyEnabled)
                 .onChange(of: hotkeyEnabled) { _, value in
                     settings.hotkeyEnabled = value
@@ -337,6 +418,14 @@ struct SettingsView: View {
     }
 
     // MARK: - Building blocks
+
+    /// A page whose heading is already the sidebar's, so it carries no label of its own.
+    private func page<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 
     private func section<Content: View>(
         _ title: String,

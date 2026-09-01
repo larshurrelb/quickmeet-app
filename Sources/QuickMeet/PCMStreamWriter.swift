@@ -57,9 +57,6 @@ final class PCMStreamWriter {
     private var monoScratch: [Float]
     private var int16Scratch: [Int16]
     private let converter: AVAudioConverter?
-    private let sourceFormat: AVAudioFormat
-    private let monoSourceFormat: AVAudioFormat
-    private let outputFormat: AVAudioFormat
     private var convertBuffer: AVAudioPCMBuffer?
     private var monoBuffer: AVAudioPCMBuffer?
 
@@ -73,7 +70,6 @@ final class PCMStreamWriter {
     ///   sample rate and channel count.
     init(url: URL, sourceFormat: AVAudioFormat, maxFrames: AVAudioFrameCount = 4096) throws {
         self.url = url
-        self.sourceFormat = sourceFormat
 
         guard let monoSource = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -86,9 +82,6 @@ final class PCMStreamWriter {
             channels: 1,
             interleaved: false
         ) else { throw WriterError.unsupportedFormat }
-
-        self.monoSourceFormat = monoSource
-        self.outputFormat = output
 
         // Channels are collapsed by hand before this converter sees anything, so it only
         // ever does rate conversion. AVAudioConverter's own multichannel-to-mono mapping

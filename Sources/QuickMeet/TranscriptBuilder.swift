@@ -135,7 +135,14 @@ enum TranscriptBuilder {
 
         // Anyone who only joined after the boundary gets a label that cannot collide with
         // an existing one.
-        var next = (established.compactMap { $0.speaker.flatMap(index(ofLabel:)) }.max() ?? 0) + 1
+        //
+        // `SpeakerID.number` reads the label's own number however the model spelled it —
+        // `spk_1`, `spk:0` and `speaker 2` are all shapes the same endpoint returns. A parse
+        // that only understood `_` returned nil for the rest, so `next` restarted at 1 for
+        // every chunk and two people who joined after different boundaries were handed the
+        // same label and merged into one for the rest of the meeting.
+        var next = (established.compactMap { $0.speaker.flatMap(SpeakerID.number(inLabel:)) }
+            .max() ?? 0) + 1
         for label in Set(candidates.compactMap(\.speaker)) where mapping[label] == nil {
             mapping[label] = "spk_\(next)"
             next += 1
@@ -143,11 +150,6 @@ enum TranscriptBuilder {
 
         Diagnostics.log("speaker stitch across chunk boundary: \(mapping.sorted { $0.key < $1.key })")
         return mapping
-    }
-
-    private static func index(ofLabel label: String) -> Int? {
-        guard let last = label.split(separator: "_").last else { return nil }
-        return Int(last)
     }
 
     // MARK: - Turns

@@ -22,15 +22,20 @@ enum SpeakerID: Hashable, Codable {
         self = stored == "you" ? .you : .remote(stored)
     }
 
-    /// The name shown before the user renames anybody.
-    var defaultName: String {
+    /// The name this speaker was shown under by earlier builds.
+    ///
+    /// Nothing displays this any more — `SpeakerDirectory` names people from the order they
+    /// speak rather than from the label's text. It survives only so that notes written by an
+    /// older build, which have "Spk:0" baked into their sentences, can still be brought in
+    /// line with what the transcript now calls that person.
+    var legacyName: String {
         switch self {
         case .you:
             return "You"
         case let .remote(label):
-            // "spk_1" is the model's word, not a person's. Turn it into something a human
-            // can read at a glance, and keep the number so renaming one does not shuffle
-            // the others.
+            // Deliberately the old parse, underscores only, warts and all: the point is to
+            // reproduce the string an older build actually wrote into its notes. Reading
+            // "spk:0" correctly here would find nothing to replace.
             if let number = label.split(separator: "_").last, let index = Int(number) {
                 return "Speaker \(index)"
             }
@@ -38,17 +43,17 @@ enum SpeakerID: Hashable, Codable {
         }
     }
 
-    /// Stable palette index, so a speaker keeps their colour across relaunches.
-    var colorIndex: Int {
-        switch self {
-        case .you:
-            return 0
-        case let .remote(label):
-            if let number = label.split(separator: "_").last, let index = Int(number) {
-                return 1 + (index - 1) % 7
-            }
-            return 1 + abs(label.hashValue) % 7
-        }
+    /// The trailing number in a model-supplied label, whatever separates it.
+    ///
+    /// The label comes back from Gemini verbatim and its shape is not contractual:
+    /// `spk_1`, `spk:0` and `speaker 2` have all been seen from the same endpoint. A parse
+    /// that only understood `_` returned nil for the others, which is how "Spk:0" ended up
+    /// on screen and how two late-joining speakers could be handed the same stitched label.
+    ///
+    /// Used by `TranscriptBuilder` to number a speaker who joins after a chunk boundary.
+    static func number(inLabel label: String) -> Int? {
+        let digits = label.reversed().prefix { $0.isNumber }.reversed()
+        return digits.isEmpty ? nil : Int(String(digits))
     }
 }
 
@@ -60,8 +65,6 @@ struct Turn: Codable, Identifiable, Hashable {
     var start: TimeInterval
     var end: TimeInterval
     var text: String
-
-    var speakerID: SpeakerID { SpeakerID(stored: speaker) }
 }
 
 // MARK: - Notes
@@ -143,21 +146,19 @@ struct Meeting: Codable, Identifiable, Hashable {
         return Self.dateTitleFormatter.string(from: startedAt)
     }
 
-    func name(for speaker: String) -> String {
-        if let given = speakerNames[speaker], !given.isEmpty { return given }
-        return SpeakerID(stored: speaker).defaultName
-    }
-
-    /// Every speaker that actually says something, in the order they first speak.
-    var speakers: [String] {
-        var seen = Set<String>()
-        var ordered: [String] = []
-        for turn in turns where !seen.contains(turn.speaker) {
-            seen.insert(turn.speaker)
-            ordered.append(turn.speaker)
-        }
-        return ordered
-    }
+    /// Everything the interface needs to know about who spoke, worked out in one pass.
+    ///
+    /// The obvious shape — `name(for:)`, `speakerIndex(for:)` and `speakers` as methods on
+    /// `Meeting` — makes each of them walk the whole turn list, and every caller wants all
+    /// three *per line*. That is quadratic in the number of turns: `markdown()` on a
+    /// two-hour meeting called `name(for:)` once per turn, and each of those calls walked
+    /// every turn again. The transcript pane and the notes prompt had the same shape.
+    ///
+    /// So build one of these at the top of whatever is about to render or export, and hand
+    /// it down. Nothing here is cached on the meeting itself: the turns change when a
+    /// transcript is re-run and the names change when the user renames somebody, and a
+    /// stale directory would put the wrong name on the wrong voice.
+    var speakerDirectory: SpeakerDirectory { SpeakerDirectory(self) }
 
     static let dateTitleFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -181,6 +182,104 @@ struct Meeting: Codable, Identifiable, Hashable {
     }
 }
 
+
+// MARK: - Speaker directory
+
+/// Who spoke, what they are called, and what they used to be called.
+///
+/// Built in a single pass over the turns, because everything in here is derived from the
+/// order people first speak and the names the user has since given them — and the callers
+/// want all of it at once, per line.
+struct SpeakerDirectory {
+    /// Speakers in the order they first speak, the user included wherever they land.
+    let order: [String]
+
+    private let indices: [String: Int]
+    private let names: [String: String]
+    /// Every earlier spelling of a name, mapped to what that person is called now. Longest
+    /// first, so "Speaker 10" is never chewed up by the rule for "Speaker 1".
+    private let replacements: [(old: String, new: String)]
+    private let remoteCount: Int
+
+    init(_ meeting: Meeting) {
+        let you = SpeakerID.you.storedValue
+
+        var order: [String] = []
+        var indices: [String: Int] = [:]
+        var remotes = 0
+        for turn in meeting.turns where indices[turn.speaker] == nil {
+            order.append(turn.speaker)
+            if turn.speaker == you {
+                indices[you] = 0
+            } else {
+                remotes += 1
+                indices[turn.speaker] = remotes
+            }
+        }
+
+        var names: [String: String] = [:]
+        var replacements: [(old: String, new: String)] = []
+        for speaker in order {
+            let fallback = Self.defaultName(index: indices[speaker] ?? 0)
+            let given = meeting.speakerNames[speaker] ?? ""
+            let shown = given.isEmpty ? fallback : given
+            names[speaker] = shown
+            for prior in Self.priorNames(of: speaker, fallback: fallback) where prior != shown {
+                replacements.append((prior, shown))
+            }
+        }
+
+        self.order = order
+        self.indices = indices
+        self.names = names
+        self.replacements = replacements.sorted { $0.old.count > $1.old.count }
+        self.remoteCount = remotes
+    }
+
+    /// 0 for the user, then 1… for everyone else in the order they first speak. Name and
+    /// colour both come from this, so "Speaker 2" is always the colour of the second person
+    /// to talk.
+    ///
+    /// Deliberately derived from that order and not from the stored label. The label is the
+    /// model's word — `spk_1`, `spk:0`, `speaker 2` are all shapes the same endpoint has
+    /// returned — and the numbering starts at 0 as often as at 1. Printing it raw put
+    /// "Spk:0" in front of the user. A meeting has a first speaker; it has no zeroth one.
+    func index(of speaker: String) -> Int {
+        indices[speaker] ?? (speaker == SpeakerID.you.storedValue ? 0 : remoteCount + 1)
+    }
+
+    func name(of speaker: String) -> String {
+        names[speaker] ?? Self.defaultName(index: index(of: speaker))
+    }
+
+    /// Brings the names inside stored notes text up to date.
+    ///
+    /// The notes are generated once, against whatever the speakers were called at the time,
+    /// and never regenerated — a rename is a display concern, and paying for a second
+    /// summarisation pass to change a word would be absurd. So every earlier spelling has
+    /// to be swapped out here: the name the user has since given somebody, and also the raw
+    /// "Spk:0" that older builds wrote into the notes before speakers were numbered from
+    /// the order they speak.
+    func substituting(in text: String) -> String {
+        replacements.reduce(text) { $0.replacingOccurrences(of: $1.old, with: $1.new) }
+    }
+
+    private static func defaultName(index: Int) -> String {
+        index == 0 ? "You" : "Speaker \(index)"
+    }
+
+    /// Spellings of a speaker that could be sitting in notes written earlier.
+    ///
+    /// The raw label is only offered when it is long enough and numbered enough to be
+    /// unmistakable. A one- or two-character label — the model has been known to return
+    /// bare letters — would match halfway through ordinary words and shred the notes.
+    private static func priorNames(of speaker: String, fallback: String) -> [String] {
+        guard speaker != SpeakerID.you.storedValue else { return ["You"] }
+        return [fallback] + [SpeakerID(stored: speaker).legacyName, speaker]
+            .filter { $0.count >= 3 && $0.contains(where: \.isNumber) }
+    }
+}
+
 // MARK: - Markdown export
 
 extension Meeting {
@@ -190,6 +289,10 @@ extension Meeting {
     /// other people's voices is going to be pasted into a ticket or an email, the fact of
     /// whether they agreed to be recorded should travel with it.
     func markdown() -> String {
+        // Once, not per line: this used to call `name(for:)` inside the transcript loop,
+        // and each of those calls walked every turn in the meeting.
+        let speakers = speakerDirectory
+
         var out = "# \(displayTitle)\n\n"
         out += "_\(Meeting.dateTitleFormatter.string(from: startedAt)) · "
         out += "\(Meeting.formatted(duration: duration))_\n\n"
@@ -202,53 +305,40 @@ extension Meeting {
 
         if let notes, !notes.isEmpty {
             if !notes.summary.isEmpty {
-                out += "## Summary\n\n\(substituteNames(in: notes.summary))\n\n"
+                out += "## Summary\n\n\(speakers.substituting(in: notes.summary))\n\n"
             }
-            if !notes.decisions.isEmpty {
-                out += "## Decisions\n\n"
-                for decision in notes.decisions { out += "- \(substituteNames(in: decision))\n" }
-                out += "\n"
-            }
+            out += section("Decisions", notes.decisions, speakers)
             if !notes.actionItems.isEmpty {
                 out += "## Action items\n\n"
                 for item in notes.actionItems {
-                    let owner = item.owner.isEmpty ? "" : " — **\(substituteNames(in: item.owner))**"
-                    out += "- [\(item.done ? "x" : " ")] \(substituteNames(in: item.text))\(owner)\n"
+                    let owner = item.owner.isEmpty
+                        ? ""
+                        : " — **\(speakers.substituting(in: item.owner))**"
+                    out += "- [\(item.done ? "x" : " ")] "
+                        + "\(speakers.substituting(in: item.text))\(owner)\n"
                 }
                 out += "\n"
             }
-            if !notes.keyPoints.isEmpty {
-                out += "## Key points\n\n"
-                for point in notes.keyPoints { out += "- \(substituteNames(in: point))\n" }
-                out += "\n"
-            }
-            if !notes.openQuestions.isEmpty {
-                out += "## Open questions\n\n"
-                for question in notes.openQuestions { out += "- \(substituteNames(in: question))\n" }
-                out += "\n"
-            }
+            out += section("Key points", notes.keyPoints, speakers)
+            out += section("Open questions", notes.openQuestions, speakers)
         }
 
         if !turns.isEmpty {
             out += "## Transcript\n\n"
             for turn in turns {
-                out += "**\(name(for: turn.speaker))** _(\(Meeting.timestamp(turn.start)))_\n"
+                out += "**\(speakers.name(of: turn.speaker))** _(\(Meeting.timestamp(turn.start)))_\n"
                 out += "\(turn.text)\n\n"
             }
         }
         return out
     }
 
-    /// Replaces canonical labels with the names the user gave.
-    ///
-    /// The notes are generated once, against `Speaker 1` and friends, and never
-    /// regenerated when somebody is renamed — a rename is a display concern, and paying
-    /// for a second summarisation pass to change a word would be absurd.
-    func substituteNames(in text: String) -> String {
-        var result = text
-        for (label, name) in speakerNames where !name.isEmpty {
-            result = result.replacingOccurrences(of: SpeakerID(stored: label).defaultName, with: name)
-        }
-        return result
+    private func section(
+        _ heading: String, _ items: [String], _ speakers: SpeakerDirectory
+    ) -> String {
+        guard !items.isEmpty else { return "" }
+        return "## \(heading)\n\n"
+            + items.map { "- \(speakers.substituting(in: $0))\n" }.joined()
+            + "\n"
     }
 }

@@ -2,10 +2,10 @@ import SwiftUI
 
 /// Shared visual language.
 enum Theme {
-    /// One colour per speaker, assigned by `SpeakerID.colorIndex` so it is stable across
-    /// relaunches and across renames. Index 0 is always the user — a meeting transcript is
-    /// read by scanning for your own turns, so yours is the one that has to be findable at
-    /// a glance.
+    /// One colour per speaker, assigned by `SpeakerDirectory.index(of:)` so it is stable
+    /// across relaunches and across renames. Index 0 is always the user — a meeting
+    /// transcript is read by scanning for your own turns, so yours is the one that has to
+    /// be findable at a glance.
     static let speakerColors: [Color] = [
         Color(red: 0.29, green: 0.44, blue: 0.94),   // you — indigo
         Color(red: 0.09, green: 0.64, blue: 0.58),   // teal
@@ -17,9 +17,13 @@ enum Theme {
         Color(red: 0.72, green: 0.42, blue: 0.26),   // clay
     ]
 
-    static func color(for speaker: String) -> Color {
-        let index = SpeakerID(stored: speaker).colorIndex
-        return speakerColors[index % speakerColors.count]
+    /// - Parameter index: from `SpeakerDirectory.index(of:)` — 0 is the user.
+    ///
+    /// Remote speakers wrap around the tail of the palette rather than the whole of it, so
+    /// a ninth speaker repeats somebody else's colour instead of borrowing the user's.
+    static func color(index: Int) -> Color {
+        guard index > 0 else { return speakerColors[0] }
+        return speakerColors[1 + (index - 1) % (speakerColors.count - 1)]
     }
 
     static let recordRed = Color(red: 0.90, green: 0.25, blue: 0.24)

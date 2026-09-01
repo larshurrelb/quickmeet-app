@@ -33,8 +33,9 @@ final class MeetingRecorder: ObservableObject {
     private let store: MeetingStore
     private let settings: AppSettings
 
-    // `store` has no default: `MeetingStore.shared` is main-actor isolated, and default
-    // argument expressions are evaluated in a nonisolated context.
+    // `store` has no default because there is exactly one, owned by `AppDelegate` and
+    // handed to everything that needs it — and a main-actor default argument could not be
+    // evaluated here anyway, since default expressions are nonisolated.
     init(store: MeetingStore, settings: AppSettings = .shared) {
         self.store = store
         self.settings = settings
@@ -170,22 +171,6 @@ final class MeetingRecorder: ObservableObject {
         systemLevel = 0
         systemAudioWarning = nil
         return id
-    }
-
-    /// Abandons a meeting and removes everything it wrote. Used when the user cancels
-    /// within the first couple of seconds, which is almost always a misfire.
-    func cancel() {
-        guard isRecording, let id = meetingID else { return }
-        isRecording = false
-        stopClock()
-        mic.stop()
-        system.stop()
-        store.delete(id)
-        meetingID = nil
-        startedAt = nil
-        micLevel = 0
-        systemLevel = 0
-        systemAudioWarning = nil
     }
 
     // MARK: - Health

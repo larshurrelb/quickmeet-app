@@ -8,10 +8,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let store = MeetingStore()
     private lazy var recorder = MeetingRecorder(store: store)
     private lazy var pipeline = TranscriptionPipeline(store: store)
-    private lazy var meetingsWindow = MeetingsWindowController(store: store) { [weak self] id in
-        self?.pipeline.process(id)
-    }
-    private lazy var settingsWindow = SettingsWindowController(store: store)
+    private lazy var meetingsWindow = MeetingsWindowController(
+        store: store,
+        onRetry: { [weak self] id in self?.pipeline.process(id) },
+        onToggleRecording: { [weak self] in self?.toggleMeeting() }
+    )
 
     private let consent = ConsentWindowController()
     private let hud = RecordingHUD()
@@ -20,11 +21,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var cancellables = Set<AnyCancellable>()
 
+    /// Meetings whose finish is still worth a notification. `stopMeeting` adds one and the
+    /// store observer posts it — rather than each meeting opening a Combine subscription of
+    /// its own, which left a spent `AnyCancellable` in the set for every meeting recorded.
+    private var awaitingNotification = Set<UUID>()
+
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Diagnostics.log("QuickMeet launched")
 
+        buildMainMenu()
         buildStatusItem()
         observeRecorder()
 
@@ -46,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // First run: no key means nothing can work, so start where the user has to start.
         if !AppSettings.shared.hasAPIKey {
-            settingsWindow.show()
+            meetingsWindow.showSettings()
         }
     }
 
@@ -88,44 +95,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The HUD is driven from the recorder's published state rather than pushed to from
         // the capture callbacks, so there is exactly one source of truth for "are we
         // recording and how loud is it".
+        //
+        // `objectWillChange` fires *before* the value lands, so delivery has to be deferred
+        // — that is what the scheduler is for. `DispatchQueue.main` rather than
+        // `RunLoop.main`: a run loop scheduler delivers only in the default mode, so the
+        // clock in the menu bar would freeze for as long as a menu was open.
         recorder.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                DispatchQueue.main.async { MainActor.assumeIsolated { self?.syncHUD() } }
-            }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.syncHUD() } }
             .store(in: &cancellables)
 
         store.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                DispatchQueue.main.async { MainActor.assumeIsolated { self?.updateStatusTitle() } }
-            }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.meetingsChanged() } }
             .store(in: &cancellables)
     }
 
     private func syncHUD() {
-        guard recorder.isRecording else {
+        if recorder.isRecording {
+            hud.show()
+            hud.update(
+                elapsed: recorder.elapsed,
+                micLevel: recorder.micLevel,
+                systemLevel: recorder.systemLevel,
+                warning: recorder.systemAudioWarning
+            )
+        } else {
             hud.hide()
-            updateStatusTitle()
-            return
         }
-        hud.show()
-        hud.update(
-            elapsed: recorder.elapsed,
-            micLevel: recorder.micLevel,
-            systemLevel: recorder.systemLevel,
-            warning: recorder.systemAudioWarning
-        )
         updateStatusTitle()
+    }
+
+    /// Meetings are long and people walk away from them, so a transcript finishing is worth
+    /// a nudge. By the time this runs the pipeline has already dropped the meeting from its
+    /// running set, so `isBusy` is current too.
+    private func meetingsChanged() {
+        updateStatusTitle()
+
+        for meeting in store.meetings where awaitingNotification.contains(meeting.id) {
+            guard meeting.status == .ready || meeting.status == .failed else { continue }
+            awaitingNotification.remove(meeting.id)
+            post(meeting)
+        }
+    }
+
+    // MARK: - Main menu
+
+    /// A regular app has a menu bar, and an app that ships without one has no ⌘Q, no ⌘W
+    /// and — the part that actually bites — no Cut, Copy or Paste in any of its text
+    /// fields, including the one the API key is pasted into.
+    private func buildMainMenu() {
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About QuickMeet", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        add(appMenu, "Settings…", #selector(openSettings), key: ",")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide QuickMeet", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit QuickMeet", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        let meetingItem = NSMenuItem()
+        let meetingMenu = NSMenu(title: "Meeting")
+        let record = add(meetingMenu, "Record Meeting", #selector(toggleFromMenu), key: "r")
+        record.keyEquivalentModifierMask = [.command, .option]
+        meetingMenu.addItem(.separator())
+        add(meetingMenu, "All Meetings", #selector(openMeetings), key: "0")
+        meetingItem.submenu = meetingMenu
+        main.addItem(meetingItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        main.addItem(editItem)
+
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimise", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowItem.submenu = windowMenu
+        main.addItem(windowItem)
+
+        NSApp.mainMenu = main
+        NSApp.windowsMenu = windowMenu
+    }
+
+    /// Clicking the Dock icon brings the meetings window back. Closing that window does not
+    /// quit QuickMeet — a meeting can be recording with nothing on screen — so without this
+    /// the Dock icon would bounce and do nothing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { meetingsWindow.show() }
+        return true
     }
 
     // MARK: - Status item
 
     private func buildStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(
-            systemSymbolName: "waveform.circle", accessibilityDescription: "QuickMeet"
-        )
+        item.button?.image = Self.idleIcon
         item.button?.imagePosition = .imageLeading
 
         let menu = NSMenu()
@@ -145,25 +229,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let button = statusItem?.button else { return }
 
         if recorder.isRecording {
+            // Recording keeps the filled red dot rather than the logo. The one thing the
+            // menu bar has to say while a meeting runs is *that a meeting is running*, and
+            // a red circle says it from across the room; a monochrome app mark does not.
             button.image = NSImage(
                 systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording"
             )
             button.title = " \(Meeting.formatted(duration: recorder.elapsed))"
             button.contentTintColor = .systemRed
         } else if pipeline.isBusy {
-            button.image = NSImage(
-                systemSymbolName: "waveform.circle", accessibilityDescription: "Transcribing"
-            )
+            button.image = Self.idleIcon
             button.title = " ···"
             button.contentTintColor = nil
         } else {
-            button.image = NSImage(
-                systemSymbolName: "waveform.circle", accessibilityDescription: "QuickMeet"
-            )
+            button.image = Self.idleIcon
             button.title = ""
             button.contentTintColor = nil
         }
     }
+
+    /// The app's own mark, as a template so it inverts with the menu bar. Falls back to the
+    /// old symbol if `Logo.png` is missing from the bundle — a menu bar item with no image
+    /// is an invisible one, and this is the only way into the app.
+    private static let idleIcon: NSImage? = {
+        if let icon = Branding.statusIcon {
+            icon.accessibilityDescription = "QuickMeet"
+            return icon
+        }
+        return NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "QuickMeet")
+    }()
 
     /// The menu is rebuilt when it opens rather than kept in sync from elsewhere.
     /// Permissions change outside the app, meetings finish in the background, and reading
@@ -221,9 +315,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Actions
 
     @objc private func startFromMenu() { startMeeting() }
+    @objc private func toggleFromMenu() { toggleMeeting() }
     @objc private func stopFromMenu() { stopMeeting() }
     @objc private func openMeetings() { meetingsWindow.show() }
-    @objc private func openSettings() { settingsWindow.show() }
+    @objc private func openSettings() { meetingsWindow.showSettings() }
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func openMeeting(_ sender: NSMenuItem) {
@@ -251,7 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !recorder.isRecording else { return }
 
         guard AppSettings.shared.hasAPIKey else {
-            settingsWindow.show()
+            meetingsWindow.showSettings()
             return
         }
 
@@ -297,24 +392,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func stopMeeting() {
         guard let id = recorder.stop() else { return }
         syncHUD()
+        awaitingNotification.insert(id)
         pipeline.process(id)
-        notifyWhenReady(id)
-    }
-
-    /// Watches one meeting to completion and posts a notification. Meetings are long and
-    /// people walk away from them; the transcript finishing is worth a nudge.
-    private func notifyWhenReady(_ id: UUID) {
-        store.$meetings
-            .compactMap { $0.first(where: { $0.id == id }) }
-            .filter { $0.status == .ready || $0.status == .failed }
-            .first()
-            .sink { [weak self] meeting in
-                MainActor.assumeIsolated {
-                    self?.post(meeting)
-                    self?.updateStatusTitle()
-                }
-            }
-            .store(in: &cancellables)
     }
 
     private func post(_ meeting: Meeting) {
