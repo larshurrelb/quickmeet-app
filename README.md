@@ -19,10 +19,13 @@ nowhere else. No account, no subscription, no server of ours in the middle. No
 dependencies, no telemetry.
 
 It records both halves of a call — your microphone **and** the audio your Mac is playing —
-then transcribes them with speaker labels and writes the notes. Menu bar only, no Dock
-icon.
+then transcribes them with speaker labels and writes the notes.
 
 The long-form sibling to **QuickTalk**, which does push-to-talk dictation.
+
+<p align="center">
+  <img src="Screenshot.png" width="900" alt="The QuickMeet window: meetings down the left, and the selected meeting's summary, action items with owners, and decisions on the right">
+</p>
 
 ---
 
