@@ -39,10 +39,13 @@ enum ConsentCopy {
     /// Something to actually say. The single most useful thing this screen can offer is
     /// the sentence itself — the reason people skip asking is rarely principle, it is not
     /// knowing how to raise it without making it awkward.
-    static let phrases: [(language: String, text: String)] = [
-        ("English", "Before we start — I'd like to record this and get an automatic summary. Is that alright with everyone?"),
-        ("Deutsch", "Bevor wir loslegen — ich würde das gern aufnehmen, um automatisch eine Zusammenfassung zu bekommen. Ist das für alle okay?"),
-    ]
+    ///
+    /// One sentence, in English. Translations were tried and dropped: a second language
+    /// doubles the height of the screen for a phrase most users will never say, and the
+    /// wording is meant to be adapted anyway.
+    static let phrase =
+        "Before we start — I'd like to record this and get an automatic summary. "
+        + "Is that alright with everyone?"
 
     static let headphonesHint =
         "Wearing headphones gives a noticeably better transcript — otherwise your microphone "
@@ -108,7 +111,7 @@ struct PreRecordingConsentView: View {
 
     @State private var note = ""
     @State private var dontAskAgain = false
-    @State private var copiedIndex: Int?
+    @State private var copied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -126,38 +129,28 @@ struct PreRecordingConsentView: View {
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 10)
 
-            VStack(spacing: 6) {
-                ForEach(Array(ConsentCopy.phrases.enumerated()), id: \.offset) { index, phrase in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text(phrase.language)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 52, alignment: .leading)
-                            .padding(.top, 2)
+            HStack(alignment: .top, spacing: 8) {
+                Text(ConsentCopy.phrase)
+                    .font(.system(size: 12))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                        Text(phrase.text)
-                            .font(.system(size: 12))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(phrase.text, forType: .string)
-                            copiedIndex = index
-                        } label: {
-                            Image(systemName: copiedIndex == index ? "checkmark" : "doc.on.doc")
-                                .font(.system(size: 11))
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Copy")
-                    }
-                    .padding(10)
-                    .background(
-                        Color.primary.opacity(0.04),
-                        in: RoundedRectangle(cornerRadius: 7)
-                    )
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(ConsentCopy.phrase, forType: .string)
+                    copied = true
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 11))
                 }
+                .buttonStyle(.borderless)
+                .help("Copy")
             }
+            .padding(10)
+            .background(
+                Color.primary.opacity(0.04),
+                in: RoundedRectangle(cornerRadius: 7)
+            )
             .padding(.bottom, 14)
 
             VStack(alignment: .leading, spacing: 5) {
@@ -207,9 +200,10 @@ struct PreRecordingConsentView: View {
 
 /// Presents the consent windows.
 ///
-/// These are real windows rather than sheets because QuickMeet is an accessory app with no
-/// main window to hang a sheet on. `NSApp.activate` is called deliberately — unlike the
-/// recording HUD, this one *should* take focus: it is asking a question.
+/// These are real windows rather than sheets on the meetings window: recording is started
+/// from the menu bar and from ⌥⌘R as often as from the window, and a sheet would have to
+/// summon its host first. `NSApp.activate` is called deliberately — unlike the recording
+/// HUD, this one *should* take focus: it is asking a question.
 @MainActor
 final class ConsentWindowController {
     private var window: NSWindow?

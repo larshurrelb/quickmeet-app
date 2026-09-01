@@ -9,8 +9,6 @@ import Combine
 /// recordings of other people, "delete really deletes" is worth more than query speed.
 @MainActor
 final class MeetingStore: ObservableObject {
-    static let shared = MeetingStore()
-
     @Published private(set) var meetings: [Meeting] = []
 
     /// The folder every meeting lives in, one subfolder each.

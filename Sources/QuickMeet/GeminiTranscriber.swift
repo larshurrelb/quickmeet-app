@@ -45,7 +45,6 @@ struct GeminiTranscriber {
         case noAPIKey
         case http(Int, String)
         case badResponse(String)
-        case empty
 
         var errorDescription: String? {
             switch self {
@@ -59,8 +58,6 @@ struct GeminiTranscriber {
                 return "Gemini returned HTTP \(code). \(detail)"
             case let .badResponse(reason):
                 return "Couldn't read Gemini's response (\(reason))."
-            case .empty:
-                return "No speech was found in the recording."
             }
         }
     }

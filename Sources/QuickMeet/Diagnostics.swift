@@ -17,9 +17,12 @@ enum Diagnostics {
     private static let queue = DispatchQueue(label: "com.quickmeet.QuickMeet.diagnostics")
     private static var lastErrorText: String?
 
+    /// Built once. An `ISO8601DateFormatter` is expensive to create, and this runs on
+    /// every line — including from the transcription pipeline, per chunk.
+    private static let stamps = ISO8601DateFormatter()
+
     static func log(_ message: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        let line = "[\(stamp)] \(redacting(message))\n"
+        let line = "[\(stamps.string(from: Date()))] \(redacting(message))\n"
 
         queue.async {
             guard let data = line.data(using: .utf8) else { return }
@@ -48,16 +51,21 @@ enum Diagnostics {
     ///
     /// Both Google key formats are covered: the older `AIza…` and the current `AQ.…`.
     static func redacting(_ message: String) -> String {
-        var text = message
-        for pattern in ["AIza[0-9A-Za-z_\\-]{10,}", "AQ\\.[0-9A-Za-z_\\-.]{10,}"] {
-            text = text.replacingOccurrences(
-                of: pattern,
-                with: "…redacted…",
-                options: .regularExpression
+        keyPatterns.reduce(message) { text, pattern in
+            pattern.stringByReplacingMatches(
+                in: text,
+                range: NSRange(text.startIndex..., in: text),
+                withTemplate: "…redacted…"
             )
         }
-        return text
     }
+
+    /// Compiled once rather than per call. `replacingOccurrences(options: .regularExpression)`
+    /// builds a fresh regex every time, and this sits on the path of every logged line.
+    private static let keyPatterns: [NSRegularExpression] = [
+        "AIza[0-9A-Za-z_\\-]{10,}",
+        "AQ\\.[0-9A-Za-z_\\-.]{10,}",
+    ].compactMap { try? NSRegularExpression(pattern: $0) }
 
     static var lastError: String? {
         queue.sync { lastErrorText }

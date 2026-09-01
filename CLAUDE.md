@@ -6,9 +6,16 @@ Guidance for Claude Code working in this repository.
 
 A macOS meeting recorder and note taker. Records the microphone *and* system audio as two
 separate streams, transcribes both with Gemini 3.5 Transcribe (diarized, word timestamps),
-merges them onto one clock and writes notes. Menu-bar only (`LSUIElement`), SwiftPM
-executable assembled into an `.app` by `build.sh`. No third-party dependencies, and it
-should stay that way.
+merges them onto one clock and writes notes. A regular app — Dock icon, menu bar item and
+main menu, `setActivationPolicy(.regular)` — assembled from a SwiftPM executable into an
+`.app` by `build.sh`. No third-party dependencies, and it should stay that way.
+
+It was `LSUIElement` for a while, and the reason it is not any more is that the meetings
+window had no way back once it was closed: the only door was a small icon in the menu bar.
+Dropping `LSUIElement` means the app needs a main menu of its own — without one there is no
+⌘Q, no ⌘W, and no Cut/Copy/Paste in any text field, including the one the API key goes
+into. `AppDelegate.buildMainMenu` builds it, and `applicationShouldHandleReopen` is what
+makes clicking the Dock icon bring the window back.
 
 Sibling to QuickTalk (push-to-talk dictation). Several files are ports of its hard-won
 code — `MicRecorder`, `KeyStore`, `Diagnostics`. **Fixes to shared logic should be
@@ -145,6 +152,23 @@ was a wrong turn first.
   half the chunks of a real meeting are one side listening. Return an empty word list.
 - Diarization is 8 speakers max, experimental beyond 2. That is a supporting reason for
   the two-stream design, not the main one.
+- **The speaker label's shape is not contractual.** `spk_1`, `spk:0` and `speaker 2` have
+  all come back from the same endpoint, and the numbering starts at 0 as often as at 1. A
+  parse that only understood `_` put "Spk:0" on screen and, in `TranscriptBuilder`, handed
+  two people who joined after different chunk boundaries the same stitched label. Nothing
+  user-facing derives from the label's text now: `SpeakerDirectory` numbers remote speakers
+  from the order they first speak, from 1. `SpeakerID.legacyName` exists only to find the
+  old spellings inside notes that were written before that.
+
+- **Speaker names and colours come from `SpeakerDirectory`, built once per render or
+  export.** They used to be methods on `Meeting` — `name(for:)`, `speakerIndex(for:)`,
+  `speakers`, `substituteNames(in:)` — and each of them walked the whole turn list, while
+  every caller wanted all of them *per line*. `markdown()` was therefore quadratic in the
+  number of turns, and so were the transcript pane and the notes prompt. Build the directory
+  at the top of whatever is about to render and hand it down; don't put those methods back
+  on `Meeting`. It is deliberately *not* cached on the meeting either: turns change when a
+  transcript is re-run and names change when the user renames somebody, and a stale
+  directory puts the wrong name on the wrong voice.
 
 ### The two-stream design
 
@@ -251,9 +275,97 @@ was a wrong turn first.
   "clicking Record Meeting does nothing": the first-run consent window was opening at zero
   size every time, with nothing in the log to say so. Measured: `(0, 0)` with the flag,
   `(460, 348)` without.
-  → Set it only where the window's size is hard-coded (`SettingsWindow`). Leave it alone
-  wherever `fittingSize` is read (`ConsentWindowController`, `RecordingHUD`), and floor the
-  result so a window can never be built too small to see.
+  → Set it only where the window's size is hard-coded (`MeetingsWindowController`). Leave
+  it alone wherever `fittingSize` is read (`ConsentWindowController`, `RecordingHUD`), and
+  floor the result so a window can never be built too small to see.
+
+### The meetings window
+
+**It is a plain `HStack`, not a `NavigationSplitView`, and that is deliberate.** Hosted in a
+hand-built `NSWindow` — no `Scene`, no toolbar — SwiftUI's split view brought titlebar
+handling with it that could not be relied on. Every one of these was measured, and every
+one of them cost a release:
+
+- Its columns report **no safe area**. Anything placed at the top of the sidebar lands at
+  y 0, behind the traffic lights — by `VStack` and by `safeAreaInset` alike.
+- The list inside a column carried **scroll insets that vanished** the moment anything was
+  stacked around it (measured: `contentInsets.top` 44 → 0). The rows still looked right at
+  rest; the damage only showed on scrolling, when rows rode up into the titlebar and stayed
+  there. "Fine until you scroll" is why this survived two rounds of checking.
+- **Swapping one split view for another** — settings for meetings — left the detail column
+  permanently blank. It is backed by an `NSSplitViewController` and does not survive being
+  replaced.
+- Its **collapse button hides the sidebar with no way back**, because the button lives in
+  the column it just collapsed. One click and both the meeting list and the settings are
+  unreachable.
+
+None of that is a two-column layout being hard. The sidebar is a fixed-width `VStack` of
+heading, `ScrollView` and a pinned footer button; rows are `SidebarButton`s that draw their
+own selection and hover. Settings borrows the same sidebar with categories in place of
+meetings, so the button in the bottom corner is the only thing that changes.
+
+**The one rule that keeps the titlebar out of trouble: only decoration ignores the safe
+area.** The window does set `fullSizeContentView` with a transparent titlebar, so the
+sidebar runs the full height of the window with no line ruled across it under the traffic
+lights. What makes that safe is that SwiftUI gives a *plain* root view a top safe area the
+height of the titlebar (measured: 32), and every container here stays inside it. The
+sidebar's background and its trailing hairline are the only things that opt out, with
+`ignoresSafeArea(edges: .top)`, and they are colour rather than content. The hairline is
+drawn there rather than as a `Divider()` between the columns for the same reason — a divider
+in the stack would start below the titlebar and leave a notch at the top.
+
+- **A `ScrollView` that touches the top of the window extends into the titlebar**, insetting
+  its content instead (measured: `contentInsets.top` 32), and then scrolled text slides up
+  to the window's top edge with nothing over it. Anything non-scrolling above it stops that,
+  which is why the settings page's title is pinned outside its `ScrollView` — the meeting
+  page was already fine, its header being above the scrolling part.
+
+- The app icon and name are the **sidebar's heading**. An earlier version put them in an
+  `NSTitlebarAccessoryViewController` (`layoutAttribute = .leading`, measured at x 88),
+  which was the only place they could go while the split view owned the titlebar. The
+  proxy-icon route — `representedURL` plus a swapped `documentIconButton` image — does not
+  work at all in such a window: the button is created, given the image, and left hidden.
+- `NSHostingView.sizingOptions = []` **is correct for this window** — its size is set in
+  code and its `fittingSize` is never read. Left at the default it pushes the SwiftUI
+  content's min and max size onto the window, which is what made resizing fight back. The
+  opposite mistake, on a window that *does* read `fittingSize`, is in `ConsentWindowController`.
+- A restored frame outlives the display it was saved on, so `show()` fits the window to
+  `visibleFrame` — otherwise an unplugged monitor leaves the window hanging off the bottom
+  of the laptop screen with its resize corner unreachable.
+
+### Verifying a window without being able to see it
+
+A menu-bar app cannot be driven by the usual UI tooling, so the harness renders the real
+views instead: compile every source but `main.swift` together with a `main.swift` that
+builds `MeetingsWindowController` and captures the window. Two things to know:
+
+- **`layer.render(in:)` and `cacheDisplay` never capture the sidebar.** Vibrancy is drawn
+  by the window server, and `screencapture -l` needs a permission an unsigned harness does
+  not have. The detail column, and any window without vibrancy, render fine.
+- So measure what you cannot see: a `GeometryReader` overlay printing
+  `frame(in: .global)` answers "is this behind the titlebar" and "did this column collapse"
+  exactly, and it was the only thing that distinguished a view that was laid out correctly
+  and merely absent from the snapshot from one that was genuinely zero-sized.
+
+### Icons
+
+Three images, from two source files, and they are not interchangeable.
+
+- `AppIcon.png` is the Dock icon: the artwork already inside its rounded tile. `build.sh`
+  turns it into `AppIcon.icns` via `make-icon.swift`, which only resizes — adding a mask or
+  rounding of its own would round the corners twice.
+- `Logo.png` is the same drawing with no tile behind it. The sidebar heading uses it
+  directly; `NSApp.applicationIconImage` would put a rounded square inline next to text.
+- The menu bar icon is that logo turned into a **template**, at runtime, in `Branding`.
+  Marking the logo itself `isTemplate` does not work: a template carries only the alpha
+  channel, and this drawing's alpha is the whole silhouette — bubble and waveform together
+  — so it paints as a solid blob. The template is built from colour instead, taking
+  `1 - min(r, g, b)` as ink, which keeps the dark bubble solid, punches the white waveform
+  bars through it, and reads the red bubble as full ink rather than the washed-out grey
+  luminance gives it. Un-premultiply before reading the pixel or every soft edge darkens
+  and the mark grows a halo.
+- **The recording state keeps the red dot**, not the logo. The one thing the menu bar has
+  to say while a meeting runs is that a meeting is running.
 
 ### Consent
 
@@ -315,4 +427,9 @@ By hand:
   `custom_vocabulary`.
 - Don't merge the two capture streams into one track.
 - Don't add a hidden or indicator-free recording mode.
+- Don't reach for `NavigationSplitView` here. The two-column layout is a plain `HStack` for
+  reasons that are all written down above.
+- Don't let anything but background colour ignore the safe area in the meetings window, and
+  don't put a `ScrollView` flush against the top of it.
+- Don't show a speaker the label the model gave them, and don't number anybody from 0.
 - Don't revert to ad-hoc signing, or ship a second copy of the app anywhere on disk.

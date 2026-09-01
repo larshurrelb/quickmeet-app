@@ -20,8 +20,6 @@
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.4</string>
-    <key>LSUIElement</key>
-    <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>QuickMeet records your voice during a meeting you start, and sends it to Google Gemini to be transcribed.</string>
     <key>NSAudioCaptureUsageDescription</key>

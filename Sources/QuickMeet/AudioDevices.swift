@@ -24,18 +24,20 @@ enum AudioDevices {
     }
 
     /// Every device that can play audio, for anchoring a tap's aggregate device.
-    static func outputDeviceUIDs() -> [String] {
+    ///
+    /// Returns the numeric id alongside the UID so the caller can ask about transport type
+    /// without going back through `deviceID(forUID:)`, which re-enumerates every device in
+    /// the system for each lookup.
+    static func outputDevices() -> [(id: AudioDeviceID, uid: String)] {
         allDeviceIDs()
             .filter { channelCount($0, scope: kAudioObjectPropertyScopeOutput) > 0 }
-            .compactMap { string($0, kAudioDevicePropertyDeviceUID) }
+            .compactMap { id in
+                string(id, kAudioDevicePropertyDeviceUID).map { (id, $0) }
+            }
     }
 
     static func deviceID(forUID uid: String) -> AudioDeviceID? {
         allDeviceIDs().first { string($0, kAudioDevicePropertyDeviceUID) == uid }
-    }
-
-    static func name(forUID uid: String) -> String? {
-        deviceID(forUID: uid).flatMap { name(forDeviceID: $0) }
     }
 
     static var defaultInputDeviceID: AudioDeviceID? {
@@ -44,14 +46,6 @@ enum AudioDevices {
 
     static var defaultOutputDeviceID: AudioDeviceID? {
         defaultDevice(kAudioHardwarePropertyDefaultOutputDevice)
-    }
-
-    static var defaultInputName: String? {
-        defaultInputDeviceID.flatMap { name(forDeviceID: $0) }
-    }
-
-    static var defaultOutputName: String? {
-        defaultOutputDeviceID.flatMap { name(forDeviceID: $0) }
     }
 
     private static func defaultDevice(_ selector: AudioObjectPropertySelector) -> AudioDeviceID? {

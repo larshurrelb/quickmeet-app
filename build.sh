@@ -43,6 +43,9 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp .build/release/QuickMeet "$CONTENTS/MacOS/QuickMeet"
 cp Info.plist "$CONTENTS/Info.plist"
 cp AppIcon.icns "$CONTENTS/Resources/AppIcon.icns"
+# The same drawing without the rounded tile: the window's heading and, converted to a
+# template at runtime, the menu bar icon.
+cp Logo.png "$CONTENTS/Resources/Logo.png"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
 echo "▸ Signing as: $IDENTITY"
