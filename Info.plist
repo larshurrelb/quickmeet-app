@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>QuickMeet</string>
+    <key>CFBundleDisplayName</key>
+    <string>QuickMeet</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.quickmeet.QuickMeet</string>
+    <key>CFBundleExecutable</key>
+    <string>QuickMeet</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.4</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>QuickMeet records your voice during a meeting you start, and sends it to Google Gemini to be transcribed.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>QuickMeet records the audio your Mac is playing — the other people in your call — during a meeting you start, and sends it to Google Gemini to be transcribed.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>MIT licensed. See LICENSE.</string>
+</dict>
+</plist>

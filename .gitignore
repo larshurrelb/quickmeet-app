@@ -1,0 +1,7 @@
+.build/
+.DS_Store
+QuickMeet.app/
+
+# Generated from AppIcon.png by build.sh
+AppIcon.icns
+AppIcon.iconset/
